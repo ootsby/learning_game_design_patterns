@@ -1,13 +1,19 @@
 class Grid {
-  constructor(cellSize = 100) {
-    this.horizontileCount = Math.floor(width / cellSize);
-    this.verticalCount = Math.floor(height / cellSize);
-    this.cellWidth = cellSize;
+  constructor(
+    cellSize = 100,
+    worldHorizontileCount = 1000,
+    worldVerticalCount = 4,
+    gameObjectMovedIntoNewCellEvent,
+    gameObjectMovedOutOfGrid
+  ) {
+    this.horizontileCount = worldHorizontileCount;
+    this.verticalCount = worldVerticalCount;
     this.cellHeight = cellSize;
+    this.cellWidth = cellSize;
     this.cells = [];
-    this.offScreenLeft = {};
-    this.offScreenRight = {};
-    this.farOffScreenLeft = {};
+    this.gameObjectMovedIntoNewCellEvent = gameObjectMovedIntoNewCellEvent;
+    this.gameObjectMovedOutOfGrid = gameObjectMovedOutOfGrid;
+    this.gameObjectsOffGrid = [];
 
     for (let yCount = 0; yCount < this.verticalCount; yCount += 1) {
       const yCells = [];
@@ -21,10 +27,15 @@ class Grid {
 
   drawGrid() {
     stroke(this.lineColor);
+    noFill();
     this.cells.forEach((xCells, yIndex) => {
-      line(0, yIndex * this.cellHeight, width, yIndex * this.cellHeight);
       xCells.forEach((cell, xIndex) => {
-        line(xIndex * this.cellWidth, 0, xIndex * this.cellWidth, height);
+        rect(
+          xIndex * this.cellWidth,
+          yIndex * this.cellHeight,
+          this.cellWidth,
+          this.cellHeight
+        );
       });
     });
   }
@@ -32,34 +43,37 @@ class Grid {
   add(gameObject) {
     const xIndex = Math.floor(gameObject.location.x / this.cellWidth);
     const yIndex = Math.floor(gameObject.location.y / this.cellHeight);
-    if (xIndex === -1) {
-      this.offScreenLeft[gameObject.id] = gameObject;
-    } else if (xIndex < -1) {
-      this.farOffScreenLeft[gameObject.id] = gameObject;
-    } else if (xIndex >= this.cells[0].length) {
-      this.offScreenRight[gameObject.id] = gameObject;
-    } else {
-      this.cells[yIndex][xIndex][gameObject.id] = gameObject;
-    }
+    if (yIndex >= this.verticalCount || xIndex >= this.horizontileCount) return;
+    this.cells[yIndex][xIndex][gameObject.id] = gameObject;
   }
 
-  draw() {
-    this.cells.forEach((xCells) => {
-      xCells.forEach((gameObjects) => {
-        for (const gameObjectId in gameObjects) {
-          gameObjects[gameObjectId].draw();
+  getGameObjectsInRange(x, y, width, height) {
+    let indexX = Math.floor(x / this.cellWidth);
+    let indexY = Math.floor(y / this.cellHeight);
+    let xCount = Math.floor(width / this.cellWidth);
+    let yCount = Math.floor(height / this.cellHeight);
+    const gameObjects = [];
+
+    for (
+      let cellIndexY = indexY;
+      cellIndexY < indexY + yCount;
+      cellIndexY += 1
+    ) {
+      for (
+        let cellIndexX = indexX;
+        cellIndexX < indexX + xCount;
+        cellIndexX += 1
+      ) {
+        for (let gameObjectId in this.cells[cellIndexY][cellIndexX]) {
+          gameObjects.push(this.cells[cellIndexY][cellIndexX][gameObjectId]);
         }
-      });
-    });
-    for (const gameObjectId in this.offScreenLeft) {
-      this.offScreenLeft[gameObjectId].draw();
+      }
     }
+
+    return gameObjects;
   }
 
   update() {
-    for (const gameObjectId in this.offScreenLeft) {
-      this.handleUpdate(this.offScreenLeft[gameObjectId]);
-    }
     this.cells.forEach((xCells) => {
       xCells.forEach((gameObjects) => {
         for (const gameObjectId in gameObjects) {
@@ -67,18 +81,24 @@ class Grid {
         }
       });
     });
-    for (const gameObjectId in this.offScreenRight) {
-      this.handleUpdate(this.offScreenRight[gameObjectId]);
-    }
-    for (const gameObjectId in this.farOffScreenLeft) {
-      this.handleUpdate(this.farOffScreenLeft[gameObjectId]);
-    }
   }
 
   handleUpdate(gameObject) {
     const currentIndexX = Math.floor(gameObject.location.x / this.cellWidth);
     const currentIndexY = Math.floor(gameObject.location.y / this.cellHeight);
-    gameObject.update();
+    let nearbyGameObjects = [];
+    nearbyGameObjects = nearbyGameObjects.concat(
+      ...this.putGameObjectsInArray(
+        this.getGameObjectsInCell(currentIndexX, currentIndexY)
+      ),
+      ...this.putGameObjectsInArray(
+        this.getGameObjectsInCell(currentIndexX, currentIndexY + 1)
+      ),
+      ...this.putGameObjectsInArray(
+        this.getGameObjectsInCell(currentIndexX + 1, currentIndexY + 1)
+      )
+    );
+    gameObject.update(nearbyGameObjects);
     const nextIndexX = Math.floor(gameObject.location.x / this.cellWidth);
     const nextIndexY = Math.floor(gameObject.location.y / this.cellHeight);
 
@@ -104,6 +124,32 @@ class Grid {
     }
 
     this.add(gameObject);
+    const gameObjectsInCell = this.getGameObjectsInCell(nextIndexX, nextIndexY);
+    if (!gameObjectsInCell) {
+      this.gameObjectMovedOutOfGrid.notify(gameObject);
+      this.gameObjectsOffGrid.push(gameObject);
+    } else {
+      this.gameObjectMovedIntoNewCellEvent.notify({
+        currentCell: gameObjectsInCell,
+      });
+    }
+  }
+
+  getGameObjectsInCell(x, y) {
+    if (x >= this.horizontileCount || y >= this.verticalCount) {
+      return false;
+    }
+    return this.cells[y][x];
+  }
+
+  putGameObjectsInArray(cell) {
+    const result = [];
+
+    for (let id in cell) {
+      result.push(cell[id]);
+    }
+
+    return result;
   }
 
   isInSameGridLocation(currentIndexX, currentIndexY, nextIndexX, nextIndexY) {
@@ -121,5 +167,63 @@ class Grid {
     if (currentIndexX < -1 && nextIndexX < -1) return true;
 
     return false;
+  }
+
+  removeGameObjectsByType(type) {
+    const results = [];
+
+    this.cells.forEach((row) => {
+      row.forEach((cell) => {
+        for (let objectId in cell) {
+          if (cell[objectId].type === type) {
+            results.push(cell[objectId]);
+            delete cell[objectId];
+          }
+        }
+      });
+    });
+
+    this.gameObjectsOffGrid.forEach((gameObject, index) => {
+      if (gameObject.type === type) {
+        results.push(gameObject);
+        this.gameObjectsOffGrid[index] = null;
+      }
+    });
+
+    this.gameObjectsOffGrid = this.gameObjectsOffGrid.filter(
+      (gameObject) => gameObject !== null
+    );
+
+    return results;
+  }
+
+  handleEditCell(worldX, worldY) {
+    const gridCoordinates = this.convertWorldCoordinatesToGridCoordinates(
+      worldX,
+      worldY
+    );
+    const gameObjects = this.getGameObjectsInCell(
+      gridCoordinates.x,
+      gridCoordinates.y
+    );
+    console.log(gameObjects);
+
+    for (let gameObjectId in gameObjects) {
+      const gameObject = gameObjects[gameObjectId];
+      if (gameObject.type === gameData.types.floor) {
+        gameObject.type = gameData.types.space;
+        gameObject.drawModule = new DrawSpace();
+      } else if (gameObject.type === gameData.types.space) {
+        gameObject.type = gameData.types.floor;
+        gameObject.drawModule = new DrawFloor();
+      }
+    }
+  }
+
+  convertWorldCoordinatesToGridCoordinates(worldX, worldY) {
+    return {
+      x: Math.floor(worldX / this.cellWidth),
+      y: Math.floor(worldY / this.cellHeight),
+    };
   }
 }

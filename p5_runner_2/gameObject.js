@@ -6,21 +6,29 @@ class GameObject {
     width = gameData.cellSize,
     height = gameData.cellSize,
     drawModule,
-    velocity = createVector(-1, 0)
+    type,
+    physicsModule = new StaticPhysics()
   ) {
     this.location = createVector(x, y);
     this.width = width;
     this.height = height;
     this.drawModule = drawModule;
-    this.velocity = velocity;
     this.id = id;
+    this.physics = physicsModule;
+    this.type = type;
   }
 
-  draw() {
-    this.drawModule.draw(this.location, this.width, this.height);
+  draw(editMode = false) {
+    this.drawModule.draw(this.location, this.width, this.height, editMode);
   }
 
-  update() {
-    this.location.add(this.velocity);
+  update(nearbyGameObjects) {
+    this.physics.update(
+      this.location,
+      nearbyGameObjects,
+      this.width,
+      this.height
+    );
+    this.physics.applyForce(gravityForce);
   }
 }

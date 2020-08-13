@@ -1,19 +1,70 @@
 let grid;
 let nextObjectId;
 let camera;
+let state;
+let startGameEvent;
+let resetGameEvent;
+let playerMovedEvent;
+let gravityForce;
+let jumpEvent;
+const SPACE = 32;
+let editMode;
 
-// next time
-// stop every static object from moving
-// have the camera draw everying on the screen
-// update the camera
-// move objects around on the grid based on the cameras position
+const commands = {
+  jump: "jump",
+};
 
 function setup() {
-  createCanvas(gameData.screenWidth, gameData.screenHeight);
+  createCanvas(gameData.cameraWidth, gameData.cameraHeight);
 
-  camera = new Camera(createVector(0, 0), createVector(1, 0), width, height);
+  state = gameData.states.notStarted;
+  const gameObjectMovedIntoNewCellEvent = new EventSystem();
+  const playerWonEvent = new EventSystem();
+  const playerDiedEvent = new EventSystem();
+  const gameObjectMovedOutOfGrid = new EventSystem();
+  playerMovedEvent = new EventSystem();
+  resetGameEvent = new EventSystem();
+  startGameEvent = new EventSystem();
+  jumpEvent = new EventSystem();
+  editMode = false;
+
+  gravityForce = createVector(0, gameData.gravityForce);
+
+  startGameEvent.registerListener(() => (state = gameData.states.playing));
+  playerWonEvent.registerListener(() => (state = gameData.states.won));
+  resetGameEvent.registerListener(resetGame);
+  playerDiedEvent.registerListener(() => (state = gameData.states.died));
+
+  grid = new Grid(
+    gameData.cellSize,
+    gameData.level.length,
+    gameData.worldHeight,
+    gameObjectMovedIntoNewCellEvent,
+    gameObjectMovedOutOfGrid
+  );
   nextObjectId = 0;
-  grid = new Grid(gameData.cellSize);
+  const player = new GameObject(
+    nextObjectId,
+    gameData.player.startX,
+    gameData.player.startY,
+    gameData.player.bodyWidth,
+    gameData.player.bodyHeight,
+    new DrawPlayer(),
+    gameData.types.player,
+    new PlayerPhysics(
+      playerMovedEvent,
+      gameObjectMovedIntoNewCellEvent,
+      startGameEvent,
+      playerWonEvent,
+      playerDiedEvent,
+      gameObjectMovedOutOfGrid,
+      nextObjectId,
+      jumpEvent
+    )
+  );
+  nextObjectId += 1;
+  grid.add(player);
+  camera = new Camera(0, 0, width, height, playerMovedEvent);
 
   gameData.level.forEach((cell, index) => {
     buildLevel[cell](index * gameData.cellSize, gameData.floorY, grid);
@@ -23,8 +74,43 @@ function setup() {
 function draw() {
   background("black");
   grid.drawGrid();
-  grid.update();
-  grid.draw();
+  if (state === gameData.states.playing) {
+    grid.update();
+  }
+  camera.update();
+  camera.draw(grid, editMode);
+
+  drawInterface(state);
+}
+
+function keyPressed() {
+  if (keyCode === ENTER && state === gameData.states.notStarted) {
+    startGameEvent.notify();
+  } else if (
+    keyCode === ENTER &&
+    (state === gameData.states.won || state === gameData.states.died)
+  ) {
+    resetGameEvent.notify();
+  }
+
+  if (keyCode === SPACE && state === gameData.states.playing) {
+    jumpEvent.notify();
+  }
+
+  if (keyCode === gameData.commands.toggleEditing) {
+    editMode = !editMode;
+    if (editMode) {
+      state = gameData.states.editing;
+    } else {
+      resetGame();
+    }
+  }
+}
+
+function mouseClicked() {
+  if (editMode) {
+    grid.handleEditCell(mouseX, mouseY);
+  }
 }
 
 const buildLevel = {
@@ -35,9 +121,24 @@ const buildLevel = {
       y,
       gameData.cellSize,
       gameData.cellSize,
-      new DrawFloor()
+      new DrawFloor(),
+      gameData.types.floor
     );
     grid.add(floor);
+    nextObjectId += 1;
+  },
+
+  space(x, y, grid) {
+    const space = new GameObject(
+      nextObjectId,
+      x,
+      y,
+      gameData.cellSize,
+      gameData.cellSize,
+      new DrawSpace(),
+      gameData.types.space
+    );
+    grid.add(space);
     nextObjectId += 1;
   },
 
@@ -49,7 +150,8 @@ const buildLevel = {
       y - gameData.cellSize,
       5,
       gameData.cellSize,
-      new DrawStart()
+      new DrawStart(),
+      gameData.types.start
     );
     grid.add(start);
     nextObjectId += 1;
@@ -63,13 +165,12 @@ const buildLevel = {
       y - gameData.cellSize,
       gameData.cellSize,
       gameData.cellSize,
-      new DrawSpike()
+      new DrawSpike(),
+      gameData.types.spikeUp
     );
     grid.add(spike);
     nextObjectId += 1;
   },
-
-  space() {},
 
   end(x, y, grid) {
     this.floor(x, y, grid);
@@ -79,9 +180,20 @@ const buildLevel = {
       y - gameData.cellSize,
       5,
       gameData.cellSize,
-      new DrawEnd()
+      new DrawEnd(),
+      gameData.types.end
     );
     grid.add(end);
     nextObjectId += 1;
   },
 };
+
+function resetGame() {
+  state = gameData.states.notStarted;
+  let player = grid.removeGameObjectsByType(gameData.types.player)[0];
+  player.location.x = gameData.player.startX;
+  player.location.y = gameData.player.startY;
+  player.physics.velocity = createVector(gameData.player.speed, 0);
+  grid.add(player);
+  playerMovedEvent.notify(player.location);
+}
