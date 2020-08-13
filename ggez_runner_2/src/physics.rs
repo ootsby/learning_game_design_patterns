@@ -16,6 +16,7 @@ pub struct PlayerPhysics {
     velocity: Vector2<f32>,
     moved_event_send: Sender<f32>,
     won_event_send: Sender<()>,
+    died_event_send: Sender<()>,
 }
 
 impl PlayerPhysics {
@@ -23,11 +24,13 @@ impl PlayerPhysics {
         speed: f32,
         moved_event_send: Sender<f32>,
         won_event_send: Sender<()>,
+        died_event_send: Sender<()>,
     ) -> PlayerPhysics {
         PlayerPhysics {
             velocity: Vector2::new(speed, 0.0),
             moved_event_send,
             won_event_send,
+            died_event_send,
         }
     }
 }
@@ -40,11 +43,17 @@ impl Physics for PlayerPhysics {
         }
     }
 
-    fn handle_collisions(&mut self, other_game_objects: Vec<&GameObject>) {
-        for game_object in other_game_objects {
-            if let Types::End = game_object.my_type {
+    fn handle_collisions(&mut self, game_objects: Vec<&GameObject>) {
+        for game_object in game_objects {
+            if Types::End == game_object.my_type {
                 if let Err(error) = self.won_event_send.send(()) {
-                    println!("cound not send won event :(. I guess we lose forever now");
+                    println!("Error sending win event: {}", error);
+                }
+            }
+
+            if Types::SpikeUp == game_object.my_type {
+                if let Err(error) = self.died_event_send.send(()) {
+                    println!("Error sending died event: {}", error);
                 }
             }
         }
