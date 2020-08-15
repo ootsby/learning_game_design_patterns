@@ -1,25 +1,29 @@
 mod camera;
+mod draw;
 mod errors;
 pub mod game_data;
 pub mod game_object;
 mod grid;
+mod interface;
 mod meshes;
 mod physics;
 mod states;
 mod types;
 
 use camera::Camera;
+use draw::PlayerDraw;
 pub use errors::CustomError;
 use game_data::GameData;
 use game_object::GameObject;
 use ggez::event::EventHandler;
-use ggez::graphics::{Color, DrawParam, Font, Scale, Text};
+use ggez::graphics::Color;
 use ggez::input::keyboard::{KeyCode, KeyMods};
-use ggez::nalgebra::Point2;
+use ggez::nalgebra::Vector2;
 use ggez::{graphics, timer, Context, GameResult};
 use grid::Grid;
+use interface::Interface;
 use meshes::Meshes;
-use physics::{PlayerPhysics, StaticPhysics};
+use physics::PlayerPhysics;
 pub use states::States;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -32,14 +36,15 @@ pub struct GameState {
     camera: Camera,
     state: States,
     won_event_receive: Receiver<()>,
-    not_playing_text: Text,
-    won_text: Text,
-    dead_text: Text,
-    restart_text: Text,
     game_data: GameData,
     player_moved_event_send: Sender<f32>,
     died_event_receive: Receiver<()>,
     game_objects: HashMap<u64, GameObject>,
+    gravity_force: Vector2<f32>,
+    game_object_off_grid_event: Receiver<u64>,
+    interface: Interface,
+    jump_command: Sender<()>,
+    run_command: Sender<()>,
 }
 
 impl GameState {
@@ -47,6 +52,10 @@ impl GameState {
         let (player_moved_event_send, player_moved_event_receive) = channel::<f32>();
         let (won_event_send, won_event_receive) = channel::<()>();
         let (died_event_send, died_event_receive) = channel::<()>();
+        let (game_object_off_grid_event_send, game_object_off_grid_event_receive) =
+            channel::<u64>();
+        let (jump_command_send, jump_command_receive) = channel::<()>();
+        let (run_command_send, run_command_receive) = channel::<()>();
         let camera = Camera::new(
             game_data.player.start_x - game_data.camera_chase_x,
             0.0,
@@ -60,28 +69,32 @@ impl GameState {
             game_data.cell_size,
             game_data.world_height,
             game_data.level.len(),
+            game_object_off_grid_event_send,
         )?;
         let meshes = Meshes::new(context, &game_data)?;
         let mut game_objects = HashMap::new();
+        let interface = Interface::new();
 
         Self::populate_level(
             &mut grid,
             &game_data,
             &mut next_object_id,
-            player_moved_event_send.clone(),
-            won_event_send,
-            died_event_send,
             &mut game_objects,
         );
 
-        let mut not_playing_text = Text::new("Press ENTER to start");
-        not_playing_text.set_font(Font::default(), Scale::uniform(72.0));
-        let mut won_text = Text::new("You Won!!!");
-        won_text.set_font(Font::default(), Scale::uniform(72.0));
-        let mut dead_text = Text::new("Really???");
-        dead_text.set_font(Font::default(), Scale::uniform(72.0));
-        let mut restart_text = Text::new("Press ENTER to play again");
-        restart_text.set_font(Font::default(), Scale::uniform(64.0));
+        Self::create_player(
+            &mut next_object_id,
+            &game_data,
+            player_moved_event_send.clone(),
+            won_event_send,
+            died_event_send,
+            jump_command_receive,
+            &mut grid,
+            &mut game_objects,
+            run_command_receive,
+        );
+
+        let gravity_force = Vector2::new(0.0, game_data.gravity_force);
 
         Ok(GameState {
             background_color: Color::from_rgb(0, 51, 102),
@@ -90,14 +103,15 @@ impl GameState {
             camera,
             state: States::NotStarted,
             won_event_receive,
-            not_playing_text,
-            won_text,
-            dead_text,
-            restart_text,
             game_data,
             player_moved_event_send,
             died_event_receive,
             game_objects,
+            gravity_force,
+            game_object_off_grid_event: game_object_off_grid_event_receive,
+            interface,
+            jump_command: jump_command_send,
+            run_command: run_command_send,
         })
     }
 
@@ -105,9 +119,6 @@ impl GameState {
         grid: &mut Grid,
         game_data: &GameData,
         next_object_id: &mut u64,
-        player_moved_event_send: Sender<f32>,
-        won_event_send: Sender<()>,
-        died_event_send: Sender<()>,
         game_objects: &mut HashMap<u64, GameObject>,
     ) {
         for (index, level_type) in game_data.level.iter().enumerate() {
@@ -125,29 +136,13 @@ impl GameState {
                         game_data.cell_size * index as f32,
                         game_data.floor_y - game_data.cell_size,
                         Types::Start,
-                        Some(Box::new(StaticPhysics)),
+                        None,
+                        None,
                     );
 
                     *next_object_id += 1;
                     grid.add(&start);
                     game_objects.insert(start.id, start);
-                    let player = GameObject::new(
-                        *next_object_id,
-                        game_data.player.body_width,
-                        game_data.player.body_height,
-                        game_data.player.start_x,
-                        game_data.player.start_y,
-                        Types::Player,
-                        Some(Box::new(PlayerPhysics::new(
-                            game_data.player.speed,
-                            player_moved_event_send.clone(),
-                            won_event_send.clone(),
-                            died_event_send.clone(),
-                        ))),
-                    );
-                    grid.add(&player);
-                    *next_object_id += 1;
-                    game_objects.insert(player.id, player);
                 }
                 Types::SpikeUp => {
                     Self::create_floor_object(next_object_id, game_data, index, grid, game_objects);
@@ -159,7 +154,8 @@ impl GameState {
                         game_data.cell_size * index as f32,
                         game_data.floor_y - game_data.cell_size,
                         Types::SpikeUp,
-                        Some(Box::new(StaticPhysics)),
+                        None,
+                        None,
                     );
 
                     grid.add(&spike);
@@ -176,7 +172,8 @@ impl GameState {
                         game_data.cell_size * index as f32,
                         game_data.floor_y - game_data.cell_size,
                         Types::End,
-                        Some(Box::new(StaticPhysics)),
+                        None,
+                        None,
                     );
                     grid.add(&end);
                     *next_object_id += 1;
@@ -185,6 +182,40 @@ impl GameState {
                 _ => (),
             }
         }
+    }
+
+    fn create_player(
+        next_object_id: &mut u64,
+        game_data: &GameData,
+        player_moved_event_send: Sender<f32>,
+        won_event_send: Sender<()>,
+        died_event_send: Sender<()>,
+        jump_command: Receiver<()>,
+        grid: &mut Grid,
+        game_objects: &mut HashMap<u64, GameObject>,
+        run_command: Receiver<()>,
+    ) {
+        let player = GameObject::new(
+            *next_object_id,
+            game_data.player.body_width,
+            game_data.player.body_height,
+            game_data.player.start_x,
+            game_data.player.start_y,
+            Types::Player,
+            Some(Box::new(PlayerPhysics::new(
+                game_data.player.speed,
+                player_moved_event_send,
+                won_event_send,
+                died_event_send,
+                jump_command,
+                game_data.player.jump_force,
+                run_command,
+            ))),
+            Some(Box::new(PlayerDraw::new())),
+        );
+        grid.add(&player);
+        *next_object_id += 1;
+        game_objects.insert(player.id, player);
     }
 
     fn create_floor_object(
@@ -201,7 +232,8 @@ impl GameState {
             game_data.cell_size * offset as f32,
             game_data.floor_y,
             Types::Floor,
-            Some(Box::new(StaticPhysics)),
+            None,
+            None,
         );
         *next_object_id += 1;
         grid.add(&floor);
@@ -209,23 +241,57 @@ impl GameState {
     }
 
     fn reset_game(&mut self) {
-        if let Some((player_id, player)) = self
+        if let Some((_player_id, player)) = self
             .game_objects
             .iter_mut()
-            .find(|(game_object_id, game_object)| game_object.my_type == Types::Player)
+            .find(|(_game_object_id, game_object)| game_object.my_type == Types::Player)
         {
-            let old_player_location_x = player.location.x;
             self.grid.remove(player);
-            player.location.x = self.game_data.player.start_x;
-            player.location.y = self.game_data.player.start_y;
-            if let Err(error) = self
-                .player_moved_event_send
-                .send(player.location.x - old_player_location_x)
-            {
-                println!("error resetting camera location: {}", error);
-            }
+            player.reset(
+                self.game_data.player.start_x,
+                self.game_data.player.start_y,
+                self.game_data.player.speed,
+            );
             self.grid.add(player);
             self.state = States::NotStarted;
+            self.camera.reset();
+        }
+    }
+
+    fn handle_collisions(&mut self) {
+        let game_objects_clone = self.game_objects.clone();
+
+        if let Some((_player_id, player)) = self
+            .game_objects
+            .iter_mut()
+            .find(|(_game_object_id, game_object)| game_object.my_type == Types::Player)
+        {
+            let nearby_game_objects = self.grid.query(
+                player.location.x,
+                player.location.y,
+                player.location.x + self.game_data.cell_size * 2.0,
+                player.location.y + self.game_data.cell_size * 2.0,
+                &game_objects_clone,
+            );
+            player.handle_collisions(nearby_game_objects);
+        }
+    }
+
+    fn handle_events(&mut self) {
+        if let Ok(_) = self.won_event_receive.try_recv() {
+            self.state = States::Won;
+        }
+
+        if let Ok(_) = self.died_event_receive.try_recv() {
+            self.state = States::Died;
+        }
+
+        if let Ok(game_object_id) = self.game_object_off_grid_event.try_recv() {
+            if let Some(game_object) = self.game_objects.get(&game_object_id) {
+                if game_object.my_type == Types::Player {
+                    self.state = States::Died;
+                }
+            }
         }
     }
 }
@@ -235,31 +301,9 @@ impl EventHandler for GameState {
         while timer::check_update_time(context, 60) {
             match self.state {
                 States::Playing => {
-                    self.grid.update(&mut self.game_objects);
-                    let game_objects_clone = self.game_objects.clone();
-
-                    if let Some((player_id, player)) = self
-                        .game_objects
-                        .iter_mut()
-                        .find(|(game_object_id, game_object)| game_object.my_type == Types::Player)
-                    {
-                        let nearby_game_objects = self.grid.query(
-                            player.location.x,
-                            player.location.y,
-                            player.location.x + self.game_data.cell_size,
-                            player.location.y + self.game_data.cell_size,
-                            &game_objects_clone,
-                        );
-                        player.handle_collisions(nearby_game_objects);
-                    }
-
-                    if let Ok(_) = self.won_event_receive.try_recv() {
-                        self.state = States::Won;
-                    }
-
-                    if let Ok(_) = self.died_event_receive.try_recv() {
-                        self.state = States::Died;
-                    }
+                    self.grid.update(&mut self.game_objects, self.gravity_force);
+                    self.handle_collisions();
+                    self.handle_events();
                 }
                 _ => (),
             }
@@ -270,83 +314,17 @@ impl EventHandler for GameState {
 
     fn draw(&mut self, context: &mut Context) -> GameResult {
         graphics::clear(context, self.background_color);
-        let (screen_width, screen_height) = graphics::drawable_size(context);
 
-        if let Err(error) = self
-            .camera
-            .draw(&self.grid, &self.meshes, context, &self.game_objects)
+        self.interface.draw(&self.state, context)?;
+
+        if let Err(error) =
+            self.camera
+                .draw(&self.grid, &self.meshes, context, &mut self.game_objects)
         {
             match error {
                 CustomError::GgezGameError(error) => return Err(error),
                 _ => panic!("unknown draw error"),
             }
-        }
-
-        match self.state {
-            States::NotStarted => {
-                let (text_width, text_height) = self.not_playing_text.dimensions(context);
-                let text_width = text_width as f32;
-                let text_height = text_height as f32;
-                graphics::draw(
-                    context,
-                    &self.not_playing_text,
-                    DrawParam::new().dest(Point2::new(
-                        screen_width / 2.0 - text_width / 2.0,
-                        screen_height / 2.0 - text_height / 2.0,
-                    )),
-                )?;
-            }
-            States::Won => {
-                let (text_width, text_height) = self.won_text.dimensions(context);
-                let text_width = text_width as f32;
-                let text_height = text_height as f32;
-                graphics::draw(
-                    context,
-                    &self.won_text,
-                    DrawParam::new().dest(Point2::new(
-                        screen_width / 2.0 - text_width / 2.0,
-                        screen_height / 2.0 - text_height,
-                    )),
-                )?;
-
-                let (text_width, text_height) = self.restart_text.dimensions(context);
-                let text_width = text_width as f32;
-                let text_height = text_height as f32;
-                graphics::draw(
-                    context,
-                    &self.restart_text,
-                    DrawParam::new().dest(Point2::new(
-                        screen_width / 2.0 - text_width / 2.0,
-                        screen_height / 2.0 + text_height / 2.0,
-                    )),
-                )?;
-            }
-            States::Died => {
-                let (text_width, text_height) = self.dead_text.dimensions(context);
-                let text_width = text_width as f32;
-                let text_height = text_height as f32;
-                graphics::draw(
-                    context,
-                    &self.dead_text,
-                    DrawParam::new().dest(Point2::new(
-                        screen_width / 2.0 - text_width / 2.0,
-                        screen_height / 2.0 - text_height,
-                    )),
-                )?;
-
-                let (text_width, text_height) = self.restart_text.dimensions(context);
-                let text_width = text_width as f32;
-                let text_height = text_height as f32;
-                graphics::draw(
-                    context,
-                    &self.restart_text,
-                    DrawParam::new().dest(Point2::new(
-                        screen_width / 2.0 - text_width / 2.0,
-                        screen_height / 2.0 + text_height / 2.0,
-                    )),
-                )?;
-            }
-            _ => (),
         }
 
         // if let Err(error) = self.grid._draw(context, &self.meshes) {
@@ -371,6 +349,9 @@ impl EventHandler for GameState {
             States::NotStarted => {
                 if keycode == KeyCode::Return {
                     self.state = States::Playing;
+                    if let Err(error) = self.run_command.send(()) {
+                        println!("Error sending run command: {}", error);
+                    }
                 }
             }
             States::Won => {
@@ -383,7 +364,13 @@ impl EventHandler for GameState {
                     self.reset_game();
                 }
             }
-            _ => (),
+            States::Playing => {
+                if keycode == KeyCode::Space {
+                    if let Err(error) = self.jump_command.send(()) {
+                        println!("Error sending jump command: {}", error);
+                    }
+                }
+            }
         }
     }
 }
